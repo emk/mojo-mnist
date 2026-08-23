@@ -9,3 +9,6 @@ version = "0.1.0"
 
 [dependencies]
 max = ">=26.5.0,<27"
+
+[pypi-dependencies]
+mnists = ">=0.4.1, <0.5"
