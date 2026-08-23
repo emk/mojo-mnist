@@ -1,32 +1,105 @@
+# This is the vector_addition.mojo tutorial from
+# https://max.modular.com/gpu/intro-tutorial/, which also links to a
+# number of other promising tutorials.
+
+from layout import TileTensor, row_major
 from max.gpu.host import DeviceContext
+from std.gpu import block_dim, block_idx, thread_idx
+from std.math import ceildiv
 from std.sys import has_accelerator
-from std.gpu import block_idx, thread_idx
+
+# Vector data type and size
+comptime float_dtype = DType.float32
+comptime vector_size = 1000
+comptime layout = row_major[vector_size]()
+
+# Calculate the number of thread blocks needed by dividing the vector size
+# by the block size and rounding up.
+comptime block_size = 256
+comptime num_blocks = ceildiv(vector_size, block_size)
+
+
+def vector_addition(
+    lhs_tensor: TileTensor[float_dtype, type_of(layout), MutAnyOrigin],
+    rhs_tensor: TileTensor[float_dtype, type_of(layout), MutAnyOrigin],
+    out_tensor: TileTensor[float_dtype, type_of(layout), MutAnyOrigin],
+):
+    """Calculate the element-wise sum of two vectors on the GPU."""
+
+    # Calculate the index of the vector element for the thread to process
+    var tid = block_idx.x * block_dim.x + thread_idx.x
+
+    # Don't process out of bounds elements
+    if tid < vector_size:
+        out_tensor[tid] = lhs_tensor[tid] + rhs_tensor[tid]
+
 
 def main() raises:
     comptime if not has_accelerator():
         print("No compatible GPU found")
     else:
+        # Get the context for the attached GPU
         var ctx = DeviceContext()
-        print("Found GPU:", ctx.name())
-        print("block_idx\t\tthread_idx")
-        print("x\ty\tz", "x\ty\tz", sep="\t")
-        print("-" * 20, "-" * 20, sep="\t")
-        ctx.enqueue_function[print_threads](
-            grid_dim=(2, 2, 1),
-            block_dim=(16, 4, 2)
+
+        # Create HostBuffers for input vectors
+        var lhs_host_buffer = ctx.enqueue_create_host_buffer[float_dtype](
+            vector_size
+        )
+        var rhs_host_buffer = ctx.enqueue_create_host_buffer[float_dtype](
+            vector_size
         )
         ctx.synchronize()
-        print("Program finished")
 
-def print_threads():
-    """Print thread IDs."""
+        # Initialize the input vectors
+        for i in range(vector_size):
+            lhs_host_buffer[i] = Float32(i)
+            rhs_host_buffer[i] = Float32(Float64(i) * 0.5)
 
-    print(
-        block_idx.x,
-        block_idx.y,
-        block_idx.z,
-        thread_idx.x,
-        thread_idx.y,
-        thread_idx.z,
-        sep="\t",
-    )
+        print("LHS buffer: ", lhs_host_buffer)
+        print("RHS buffer: ", rhs_host_buffer)
+
+        # Create DeviceBuffers for the input vectors
+        var lhs_device_buffer = ctx.enqueue_create_buffer[float_dtype](
+            vector_size
+        )
+        var rhs_device_buffer = ctx.enqueue_create_buffer[float_dtype](
+            vector_size
+        )
+
+        # Copy the input vectors from the HostBuffers to the DeviceBuffers
+        ctx.enqueue_copy(dst_buf=lhs_device_buffer, src_buf=lhs_host_buffer)
+        ctx.enqueue_copy(dst_buf=rhs_device_buffer, src_buf=rhs_host_buffer)
+
+        # Create a DeviceBuffer for the result vector
+        var result_device_buffer = ctx.enqueue_create_buffer[float_dtype](
+            vector_size
+        )
+
+        # Wrap the DeviceBuffers in TileTensors
+        var lhs_tensor = TileTensor(lhs_device_buffer, layout)
+        var rhs_tensor = TileTensor(rhs_device_buffer, layout)
+        var result_tensor = TileTensor(result_device_buffer, layout)
+
+        # Compile and enqueue the kernel
+        ctx.enqueue_function[vector_addition](
+            lhs_tensor,
+            rhs_tensor,
+            result_tensor,
+            grid_dim=num_blocks,
+            block_dim=block_size,
+        )
+
+        # Create a HostBuffer for the result vector
+        var result_host_buffer = ctx.enqueue_create_host_buffer[float_dtype](
+            vector_size
+        )
+
+        # Copy the result vector from the DeviceBuffer to the HostBuffer
+        ctx.enqueue_copy(
+            dst_buf=result_host_buffer, src_buf=result_device_buffer
+        )
+
+        # Finally, synchronize the DeviceContext to run all enqueued operations
+        ctx.synchronize()
+
+        print("Result vector:", result_host_buffer)
